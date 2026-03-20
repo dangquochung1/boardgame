@@ -73,7 +73,7 @@ import { GameEngineError, GameEngineService, type GameRuntimeState } from '../ga
             <div class="text-sm text-slate-300">
               Inn pick: Inn {{ innIndexLabel() }} •
               Expected player: {{ state?.expectedPlayerId }} •
-              Pick: {{ innPickIndexLabel() }} / 5
+              Pick: {{ innPickIndexLabel() }} / {{ innPickTotalLabel() }}
             </div>
 
             <div *ngIf="state?.expectedPlayerId === myUserId" class="flex flex-col gap-3">
@@ -445,6 +445,10 @@ export class RoomComponent implements OnInit, OnDestroy {
     return String(idx + 1);
   }
 
+  innPickTotalLabel(): number {
+    return this.state?.innSelection?.arrivalOrder?.length ?? 5;
+  }
+
   async chooseSteps(steps: number) {
     this.error = null;
     try {
@@ -483,8 +487,8 @@ export class RoomComponent implements OnInit, OnDestroy {
     this.error = null;
     this.isStarting = true;
     try {
-      if (this.players.length !== 5) {
-        throw new Error('Need exactly 5 players to start this MVP.');
+      if (this.players.length < 1) {
+        throw new Error('Need at least 1 player to start this MVP.');
       }
 
       const initial = this.gameEngine.initializeTurnsState({

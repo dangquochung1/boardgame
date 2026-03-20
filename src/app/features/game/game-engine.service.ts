@@ -218,13 +218,20 @@ export class GameEngineService {
 
     // target 14 => enter inn
     if (target === 14) {
+      const playerCount = Object.keys(state.players).length;
+      if (playerCount < 1) {
+        throw new GameEngineError('INVALID_PHASE', 'No players in runtime state');
+      }
+
       const innIndex = state.stageIndex; // for stageIndex 0..3 => innQueue 0..3
       if (innIndex < 0 || innIndex > 3) {
         throw new GameEngineError('INVALID_PHASE', 'Invalid stage->inn mapping for MVP');
       }
 
       const queue = state.innQueues[innIndex];
-      if (queue.length >= 5) throw new GameEngineError('CANNOT_ENTER_INN_WHEN_FULL', 'Inn is full');
+      if (queue.length >= playerCount) {
+        throw new GameEngineError('CANNOT_ENTER_INN_WHEN_FULL', 'Inn is full');
+      }
 
       runtimePlayer.status = 'inInn';
       runtimePlayer.cellPos = 14; // debug only
@@ -235,7 +242,7 @@ export class GameEngineService {
       state.version += 1;
 
       // Stage completion: when inn filled with 5, pause for Inn card selection.
-      if (queue.length === 5) {
+      if (queue.length === playerCount) {
         const arrivalOrder = [...queue]; // slot1..slot5 arrival order
 
         state.phase = 'inn_pick';
@@ -259,8 +266,8 @@ export class GameEngineService {
   }
 
   private generateInnDraft(): InnFoodCard[] {
-    // MVP: 5 food types always appear in each Inn draw.
-    // Cost is random 1..3; points are always 6.
+    // MVP: keep 5 food types as available options. For fewer players,
+    // only the first N picks (N = arrivalOrder length) will be used.
     const foodTypes = ['food1', 'food2', 'food3', 'food4', 'food5'];
     return foodTypes.map((foodTypeId) => ({
       cardId: this.randomId(),
