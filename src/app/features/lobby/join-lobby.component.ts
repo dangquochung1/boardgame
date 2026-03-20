@@ -62,11 +62,12 @@ export class JoinLobbyComponent {
       const code = this.roomCode.trim().toUpperCase();
       if (!code) throw new Error('Room code is required.');
 
+      // Use maybeSingle() so "no rows" doesn't surface as HTTP 406.
       const { data: roomRow, error: roomErr } = await this.supabase
         .from('game_rooms')
         .select('id,room_code,status')
         .eq('room_code', code)
-        .single();
+        .maybeSingle();
       if (roomErr) throw roomErr;
       if (!roomRow) throw new Error('Room not found.');
 
