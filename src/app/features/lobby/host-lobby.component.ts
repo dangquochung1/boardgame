@@ -74,7 +74,7 @@ export class HostLobbyComponent {
             room_code: code,
             host_id: userId,
             status: 'waiting',
-            max_players: 5
+            max_players: 99
           })
           .select('id,room_code')
           .single();

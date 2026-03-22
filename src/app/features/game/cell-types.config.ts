@@ -90,3 +90,52 @@ export function getCellType(stageIndex: number, cellPos1to13: number): CellType 
   return line[idx];
 }
 
+/**
+ * Đúng 6 ô / hàng có thêm một hàng ô phụ **phía trên** — cùng loại & cùng nhãn với ô chính bên dưới.
+ * Chỉ số 1..13 theo thứ tự trên bàn cờ hàng đó.
+ */
+export const CELL_UPPER_LAYER_SLOTS: number[][] = [
+  [1, 3, 5, 8, 10, 12],
+  [2, 4, 7, 9, 11, 13],
+  [1, 4, 6, 8, 11, 13],
+  [2, 3, 5, 7, 10, 12]
+];
+
+export function hasUpperLayerCell(lineIndex: number, cellNum1to13: number): boolean {
+  const row = CELL_UPPER_LAYER_SLOTS[lineIndex];
+  return row ? row.includes(cellNum1to13) : false;
+}
+
+/** Điểm cộng demo (1–3) khi đi vào ô — để test thanh điểm; 0 = không cộng. */
+export const CELL_DEMO_SCORE_BONUS: number[][] = [
+  [1, 0, 2, 0, 3, 1, 0, 2, 0, 1, 3, 0, 2],
+  [0, 2, 1, 3, 0, 2, 0, 1, 0, 3, 2, 1, 0],
+  [2, 1, 0, 2, 3, 0, 1, 0, 2, 0, 1, 3, 2],
+  [1, 3, 2, 0, 1, 0, 2, 3, 1, 0, 2, 0, 3]
+];
+
+export function getCellDemoScoreBonus(stageIndex: number, cellPos1to13: number): number {
+  const row = CELL_DEMO_SCORE_BONUS[stageIndex];
+  if (!row) return 0;
+  const idx = cellPos1to13 - 1;
+  if (idx < 0 || idx >= row.length) return 0;
+  const v = row[idx];
+  return v >= 1 && v <= 3 ? v : 0;
+}
+
+/** Xu cộng demo (1–3) khi đi vào ô — hiển thị cạnh ô; 0 = không cộng. */
+export const CELL_DEMO_COIN_BONUS: number[][] = [
+  [2, 0, 1, 0, 3, 2, 0, 1, 0, 2, 3, 0, 1],
+  [0, 1, 3, 2, 0, 1, 0, 3, 0, 2, 1, 2, 0],
+  [1, 2, 0, 3, 1, 0, 2, 0, 1, 0, 3, 2, 1],
+  [3, 1, 2, 0, 2, 0, 1, 3, 2, 0, 1, 0, 2]
+];
+
+export function getCellDemoCoinBonus(stageIndex: number, cellPos1to13: number): number {
+  const row = CELL_DEMO_COIN_BONUS[stageIndex];
+  if (!row) return 0;
+  const idx = cellPos1to13 - 1;
+  if (idx < 0 || idx >= row.length) return 0;
+  const v = row[idx];
+  return v >= 1 && v <= 3 ? v : 0;
+}

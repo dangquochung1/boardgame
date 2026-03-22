@@ -1,6 +1,6 @@
 import { Injectable } from '@angular/core';
 import { ScoringMvpService } from './scoring-mvp.service';
-import { getCellType, type CellType } from './cell-types.config';
+import { getCellDemoCoinBonus, getCellDemoScoreBonus, getCellType } from './cell-types.config';
 
 export type GamePhase = 'character_pick' | 'turns' | 'inn_pick' | 'ended';
 
@@ -13,7 +13,7 @@ export type PlayerRuntime = {
 
   // For the current gameplay line (0..13). 0 means "before cell 1".
   cellPos: number;
-  // Used for tie-break: earlier = goes first.
+  // Thứ tự lượt khi trùng ô: số nhỏ hơn = đi trước (gán lúc khởi tạo theo xu + thứ tự chọn).
   cellEnteredAt: number;
   status: 'inLine' | 'inInn' | 'inTerminalInn';
 
@@ -31,6 +31,9 @@ export type PlayerRuntime = {
 
   // Bùa drawn at temple (stub). Content is handled later.
   buas: string[];
+
+  /** 0..4 trong khu vực hub (4 ghế + 1 quán), áp dụng lúc ở xuất phát hoặc quán nước. */
+  hubSeat: number;
 };
 
 export type GameRuntimeState = {
@@ -70,15 +73,22 @@ export type InnFoodCard = {
 export type InnSelectionState = {
   // innIndex = 0..4 (Inn1..Inn5)
   innIndex: number;
-  arrivalOrder: string[]; // length = 5, slot1..slot5
-  pickIndex: number; // 0..5 (how many picks already made)
-  cards: InnFoodCard[]; // remaining choices
+  /** Thứ tự vào quán (xếp ghế). */
+  arrivalOrder: string[];
+  /** Ai đã chọn quà / skip xong ở quán này. */
+  completedPicks: string[];
+  cards: InnFoodCard[];
 };
 
 export type ChooseStepsAction = {
   type: 'CHOOSE_STEPS';
   payload: { steps: number };
 };
+
+/** Ô hợp lệ để đi tới (bàn cờ click-to-move), chỉ cho hàng `stageIndex` hiện tại. */
+export type ValidMoveTarget =
+  | { kind: 'cell'; cellNum: number }
+  | { kind: 'inn' };
 
 type ValidationErrorCode =
   | 'NOT_EXPECTED_PLAYER'
@@ -104,18 +114,25 @@ export class GameEngineService {
       display_name: string;
       coins: number;
       score: number;
+      /** Giá nhân vật 1..6 (stub, chưa dùng hết trong MVP). */
       character_price: number | null;
+      /**
+       * Thứ tự vào bàn: 0 = chọn đầu, cao hơn = chọn sau.
+       * Cùng số xu: ai chọn sau (join_order lớn hơn) đi trước.
+       */
+      join_order?: number;
     }>;
     version?: number;
   }): GameRuntimeState {
     const players = params.players;
     const version = params.version ?? 1;
 
-    // "Càng rẻ thì càng được đi trước" => cheaper first.
+    // Xu nhiều → đi trước; cùng xu → chọn sau đi trước (join_order lớn hơn).
     const sorted = [...players].sort((a, b) => {
-      const pa = a.character_price ?? 3;
-      const pb = b.character_price ?? 3;
-      if (pa !== pb) return pa - pb;
+      if (b.coins !== a.coins) return b.coins - a.coins;
+      const ja = a.join_order ?? 0;
+      const jb = b.join_order ?? 0;
+      if (jb !== ja) return jb - ja;
       return a.player_id.localeCompare(b.player_id);
     });
 
@@ -126,7 +143,7 @@ export class GameEngineService {
       runtimePlayers[p.player_id] = {
         playerId: p.player_id,
         displayName: p.display_name,
-        characterPrice: p.character_price ?? 3,
+        characterPrice: clampCharPrice(p.character_price),
         coins: p.coins,
         score: p.score,
         cellPos: 0,
@@ -136,7 +153,8 @@ export class GameEngineService {
         templeDeeds: [],
         scenicTypes: [],
         craftCounts: {},
-        buas: []
+        buas: [],
+        hubSeat: Math.min(i, 4)
       };
     }
 
@@ -153,6 +171,44 @@ export class GameEngineService {
 
     state.expectedPlayerId = this.getExpectedPlayerId(state);
     return state;
+  }
+
+  /**
+   * Danh sách ô có thể đi tới (1..13 hoặc quán nước cuối hàng), đã loại ô bị chiếm / quán đầy.
+   */
+  getValidMoveTargets(state: GameRuntimeState, playerId: string): ValidMoveTarget[] {
+    if (state.phase !== 'turns') return [];
+    if (state.expectedPlayerId !== playerId) return [];
+    const runtimePlayer = state.players[playerId];
+    if (!runtimePlayer || runtimePlayer.status !== 'inLine') return [];
+
+    const cellPos = runtimePlayer.cellPos;
+    const maxSteps = 14 - cellPos;
+    if (!Number.isFinite(maxSteps) || maxSteps < 1) return [];
+
+    const playerCount = Object.keys(state.players).length;
+    const innIndex = state.stageIndex;
+    if (innIndex < 0 || innIndex > 3) return [];
+
+    const targets: ValidMoveTarget[] = [];
+    let innAdded = false;
+
+    for (let steps = 1; steps <= maxSteps; steps++) {
+      const target = cellPos + steps;
+      if (target <= 13) {
+        const occupied = Object.values(state.players).some(
+          (p) => p.status === 'inLine' && p.cellPos === target && p.playerId !== playerId
+        );
+        if (!occupied) targets.push({ kind: 'cell', cellNum: target });
+      } else if (target === 14) {
+        const queue = state.innQueues[innIndex];
+        if (queue.length < playerCount && !innAdded) {
+          targets.push({ kind: 'inn' });
+          innAdded = true;
+        }
+      }
+    }
+    return targets;
   }
 
   getExpectedPlayerId(state: GameRuntimeState): string | null {
@@ -234,35 +290,71 @@ export class GameEngineService {
       }
 
       runtimePlayer.status = 'inInn';
-      runtimePlayer.cellPos = 14; // debug only
-
+      runtimePlayer.cellPos = 14;
       queue.push(playerId);
+      runtimePlayer.hubSeat = queue.length - 1;
 
       state.seq += 1;
       state.version += 1;
 
-      // Stage completion: when inn filled with 5, pause for Inn card selection.
-      if (queue.length === playerCount) {
-        const arrivalOrder = [...queue]; // slot1..slot5 arrival order
-
-        state.phase = 'inn_pick';
-        state.innSelection = {
-          innIndex,
-          arrivalOrder,
-          pickIndex: 0,
-          cards: this.generateInnDraft()
-        };
-
-        state.expectedPlayerId = arrivalOrder[0] ?? null;
-        return state;
-      }
-
-      // Inn not full yet: select next expected from remaining inLine players.
-      state.expectedPlayerId = this.getExpectedPlayerId(state);
+      this.syncInnSelectionAfterQueueChange(state, innIndex);
       return state;
     }
 
     throw new GameEngineError('INVALID_STEPS', 'Unexpected target cell');
+  }
+
+  /**
+   * Vào quán: ai tới thì tới lượt chọn quà ngay (theo thứ tự vào quán).
+   * Sang line sau: chỉ khi đủ 5/5 trong quán **và** mọi người đã chọn/skip xong.
+   */
+  private syncInnSelectionAfterQueueChange(state: GameRuntimeState, innIndex: number): void {
+    const queue = state.innQueues[innIndex];
+    const playerCount = Object.keys(state.players).length;
+
+    if (!state.innSelection || state.innSelection.innIndex !== innIndex) {
+      state.innSelection = {
+        innIndex,
+        arrivalOrder: [...queue],
+        completedPicks: [],
+        cards: this.generateInnDraft()
+      };
+    } else {
+      const sel = state.innSelection;
+      sel.arrivalOrder = [...queue];
+      if (sel.cards.length === 0) {
+        sel.cards = this.generateInnDraft();
+      }
+    }
+
+    const sel = state.innSelection;
+    const everyoneInInn = queue.length === playerCount;
+    const allInQueueHavePicked =
+      queue.length > 0 && queue.every((pid) => sel.completedPicks.includes(pid));
+
+    if (everyoneInInn && allInQueueHavePicked) {
+      this.finishInnSelection(state);
+      return;
+    }
+
+    const next = this.nextInnPicker(sel);
+    if (next) {
+      state.phase = 'inn_pick';
+      state.expectedPlayerId = next;
+    } else {
+      state.phase = 'turns';
+      state.expectedPlayerId = this.getExpectedPlayerId(state);
+    }
+  }
+
+  /** Người tiếp theo chưa chọn quà / skip (theo thứ tự vào quán). */
+  private nextInnPicker(sel: InnSelectionState): string | null {
+    for (const pid of sel.arrivalOrder) {
+      if (!sel.completedPicks.includes(pid)) {
+        return pid;
+      }
+    }
+    return null;
   }
 
   private generateInnDraft(): InnFoodCard[] {
@@ -302,23 +394,42 @@ export class GameEngineService {
       throw new GameEngineError('NOT_EXPECTED_PLAYER', 'Not the expected player for inn pick');
     }
 
-    const player = state.players[playerId];
-
-    // The expected player is determined by pickIndex and arrivalOrder.
-    const expectedPid = sel.arrivalOrder[sel.pickIndex];
+    const expectedPid = this.nextInnPicker(sel);
     if (expectedPid !== playerId) {
       throw new GameEngineError('NOT_EXPECTED_PLAYER', 'Expected player mismatch');
     }
 
+    const player = state.players[playerId];
+    /** Người vào quán đầu tiên (theo thứ tự tới) được miễn phí lần chọn. */
+    const firstArrivalId = sel.arrivalOrder[0] ?? null;
+    const isFree = firstArrivalId === playerId;
+
+    const markDone = (): void => {
+      if (!sel.completedPicks.includes(playerId)) {
+        sel.completedPicks.push(playerId);
+      }
+    };
+
     if (cardId == null) {
-      // Skip
-      sel.pickIndex += 1;
-      state.expectedPlayerId = sel.pickIndex < sel.arrivalOrder.length ? sel.arrivalOrder[sel.pickIndex] : null;
+      markDone();
       state.version += 1;
       state.seq += 1;
 
-      if (sel.pickIndex >= sel.arrivalOrder.length) {
+      const q = state.innQueues[sel.innIndex];
+      const pc = Object.keys(state.players).length;
+      const shouldFinishInn =
+        q.length === pc && q.every((pid) => sel.completedPicks.includes(pid));
+      if (shouldFinishInn) {
         return this.finishInnSelection(state);
+      }
+
+      const next = this.nextInnPicker(sel);
+      if (next) {
+        state.phase = 'inn_pick';
+        state.expectedPlayerId = next;
+      } else {
+        state.phase = 'turns';
+        state.expectedPlayerId = this.getExpectedPlayerId(state);
       }
       return state;
     }
@@ -332,8 +443,6 @@ export class GameEngineService {
       throw new GameEngineError('INVALID_STEPS', 'Cannot pick duplicate food type');
     }
 
-    // Only the first arrival (pickIndex === 0) is free.
-    const isFree = sel.pickIndex === 0;
     if (!isFree) {
       if (player.coins < card.cost) {
         throw new GameEngineError('INVALID_STEPS', 'Not enough coins to buy this card');
@@ -347,16 +456,27 @@ export class GameEngineService {
     // Remove chosen card from remaining options.
     sel.cards.splice(cardIdx, 1);
 
-    sel.pickIndex += 1;
+    markDone();
     state.seq += 1;
     state.version += 1;
 
-    if (sel.pickIndex >= sel.arrivalOrder.length) {
+    const q = state.innQueues[sel.innIndex];
+    const pc = Object.keys(state.players).length;
+    const shouldFinishInn =
+      q.length === pc && q.every((pid) => sel.completedPicks.includes(pid));
+    if (shouldFinishInn) {
       state.expectedPlayerId = null;
       return this.finishInnSelection(state);
     }
 
-    state.expectedPlayerId = sel.arrivalOrder[sel.pickIndex];
+    const next = this.nextInnPicker(sel);
+    if (next) {
+      state.phase = 'inn_pick';
+      state.expectedPlayerId = next;
+    } else {
+      state.phase = 'turns';
+      state.expectedPlayerId = this.getExpectedPlayerId(state);
+    }
     return state;
   }
 
@@ -384,31 +504,27 @@ export class GameEngineService {
         p.status = 'inLine';
         p.cellPos = 0;
         p.cellEnteredAt = transferBase + i;
+        p.hubSeat = Math.min(i, 4);
       }
 
       state.expectedPlayerId = this.getExpectedPlayerId(state);
       return state;
     }
 
-    // Inn4 (index3): move to Inn5 and immediately start inn5 pick.
+    // Inn4 (index3): chuyển cả bàn sang quán cuối (Inn5) — đủ người nên sync mở chọn quà ngay.
     if (innIndex === 3) {
       state.innQueues[3] = [];
       state.innQueues[4] = [...arrivalOrder];
 
-      for (const pid of arrivalOrder) {
+      arrivalOrder.forEach((pid, i) => {
         const p = state.players[pid];
         p.status = 'inTerminalInn';
         p.cellPos = 14;
-      }
+        p.hubSeat = Math.min(i, 4);
+      });
 
-      state.phase = 'inn_pick';
-      state.innSelection = {
-        innIndex: 4,
-        arrivalOrder: [...arrivalOrder],
-        pickIndex: 0,
-        cards: this.generateInnDraft()
-      };
-      state.expectedPlayerId = arrivalOrder[0] ?? null;
+      state.innSelection = null;
+      this.syncInnSelectionAfterQueueChange(state, 4);
       return state;
     }
 
@@ -433,19 +549,19 @@ export class GameEngineService {
       case 'rice': {
         // Đồng lúa: +3 tiền.
         this.scoring.applyRice(player);
-        return;
+        break;
       }
       case 'temple': {
         // Chùa (temple): auto-pick the best affordable deed value in [1..3].
         const deed = (Math.min(3, Math.floor(player.coins)) as number) || 0;
         if (deed >= 1) this.scoring.applyTempleDeed(player, deed as 1 | 2 | 3);
-        return;
+        break;
       }
       case 'scenic': {
         // Phong cảnh: auto-draw 1 card among 3 types.
         const scenicType = (1 + Math.floor(Math.random() * 3)) as 1 | 2 | 3;
         this.scoring.applyScenicCard(player, scenicType);
-        return;
+        break;
       }
       case 'village': {
         // Làng nghề: draw 3 items, auto-buy anything affordable (1..3 items).
@@ -455,7 +571,7 @@ export class GameEngineService {
           cost: 1 + Math.floor(Math.random() * 3)
         }));
         this.scoring.applyVillagePurchase(player, items);
-        return;
+        break;
       }
       case 'normal':
       case 'effect':
@@ -465,8 +581,23 @@ export class GameEngineService {
       case 'thay_boi':
       default:
         // Stub/no-op for cells not implemented yet.
-        return;
+        break;
+    }
+
+    const demoPts = getCellDemoScoreBonus(state.stageIndex, cellPos);
+    if (demoPts > 0) {
+      player.score += demoPts;
+    }
+    const demoCoins = getCellDemoCoinBonus(state.stageIndex, cellPos);
+    if (demoCoins > 0) {
+      player.coins += demoCoins;
     }
   }
+}
+
+function clampCharPrice(n: number | null | undefined): number {
+  const v = Math.round(Number(n));
+  if (!Number.isFinite(v)) return 3;
+  return Math.max(1, Math.min(6, v));
 }
 

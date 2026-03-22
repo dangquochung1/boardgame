@@ -19,9 +19,6 @@ import { GameEngineError, GameEngineService, type GameRuntimeState } from '../ga
               Status: {{ roomStatus }} • Phase: {{ phase }}
             </div>
           </div>
-          <div class="text-sm text-slate-400">
-            You are: {{ isHost ? 'Host' : 'Player' }}
-          </div>
         </div>
 
         <div class="bg-slate-800 rounded-xl p-4">
@@ -73,7 +70,7 @@ import { GameEngineError, GameEngineService, type GameRuntimeState } from '../ga
             <div class="text-sm text-slate-300">
               Inn pick: Inn {{ innIndexLabel() }} •
               Expected player: {{ state?.expectedPlayerId }} •
-              Pick: {{ innPickIndexLabel() }} / {{ innPickTotalLabel() }}
+              Tiến độ chọn: {{ innPickIndexLabel() }}
             </div>
 
             <div *ngIf="state?.expectedPlayerId === myUserId" class="flex flex-col gap-3">
@@ -88,13 +85,15 @@ import { GameEngineError, GameEngineService, type GameRuntimeState } from '../ga
                   class="rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-900 font-semibold px-3 py-2 disabled:opacity-50"
                   [disabled]="
                     (state?.players?.[myUserId]?.foods?.includes(card.foodTypeId) ?? false) ||
-                    (state?.innSelection?.pickIndex !== 0 &&
+                    (state?.innSelection?.arrivalOrder?.[0] !== myUserId &&
                       (state?.players?.[myUserId]?.coins ?? 0) < card.cost)
                   "
                   (click)="chooseInnCard(card.cardId)"
                 >
                   {{ card.foodTypeId }} • {{ card.points }}đ • cost:
-                  {{ state?.innSelection?.pickIndex === 0 ? '0 (free)' : card.cost }}
+                  {{
+                    state?.innSelection?.arrivalOrder?.[0] === myUserId ? '0 (free)' : card.cost
+                  }}
                 </button>
               </div>
 
@@ -112,12 +111,12 @@ import { GameEngineError, GameEngineService, type GameRuntimeState } from '../ga
           </div>
 
           <button
-            *ngIf="isHost"
+            *ngIf="canStartGame()"
             class="rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-900 font-semibold px-4 py-2 disabled:opacity-50 w-fit"
             [disabled]="isStarting"
             (click)="startGameStub()"
           >
-            {{ isStarting ? 'Starting...' : 'Start game (stub)' }}
+            {{ isStarting ? 'Starting...' : 'Start game' }}
           </button>
 
           <div *ngIf="phase === 'ended'" class="mt-2">
@@ -151,7 +150,8 @@ export class RoomComponent implements OnInit, OnDestroy {
   roomCode = '';
   roomId = '';
   roomStatus: string = 'unknown';
-  isHost = false;
+  /** Used only to decide who runs the action queue (avoid double-apply with multiple tabs). */
+  private isHost = false;
   isStarting = false;
   error: string | null = null;
 
@@ -184,7 +184,7 @@ export class RoomComponent implements OnInit, OnDestroy {
         .from('game_rooms')
         .select('id,host_id,status')
         .eq('room_code', this.roomCode)
-        .single();
+        .maybeSingle();
       if (roomErr) throw roomErr;
       if (!roomRow) throw new Error('Room not found.');
 
@@ -291,7 +291,7 @@ export class RoomComponent implements OnInit, OnDestroy {
           filter: `room_id=eq.${this.roomId}`
         },
         async (payload: any) => {
-          if (!this.isHost) return;
+          if (!this.shouldProcessActions()) return;
           const newRow = payload?.new;
           if (!newRow) return;
           if (newRow.processed_at) return;
@@ -440,13 +440,32 @@ export class RoomComponent implements OnInit, OnDestroy {
   }
 
   innPickIndexLabel(): string {
-    const idx = this.state?.innSelection?.pickIndex;
-    if (idx == null) return '-';
-    return String(idx + 1);
+    const sel = this.state?.innSelection;
+    if (!sel) return '-';
+    const done = sel.completedPicks?.length ?? 0;
+    const total = sel.arrivalOrder?.length ?? 0;
+    return `${done}/${total}`;
   }
 
   innPickTotalLabel(): number {
-    return this.state?.innSelection?.arrivalOrder?.length ?? 5;
+    return this.state?.innSelection?.arrivalOrder?.length ?? 1;
+  }
+
+  /** True if this session's user is listed in game_room_players for this room. */
+  isPlayerInRoom(): boolean {
+    return this.players.some((p) => p.player_id === this.myUserId);
+  }
+
+  /** Any member in the room can start (needs matching RLS on Supabase). */
+  canStartGame(): boolean {
+    return !!this.roomId && this.isPlayerInRoom();
+  }
+
+  /** Host always processes; solo player processes their own moves. */
+  private shouldProcessActions(): boolean {
+    if (!this.isPlayerInRoom()) return false;
+    if (this.players.length <= 1) return true;
+    return this.isHost;
   }
 
   async chooseSteps(steps: number) {
@@ -492,12 +511,13 @@ export class RoomComponent implements OnInit, OnDestroy {
       }
 
       const initial = this.gameEngine.initializeTurnsState({
-        players: this.players.map((p) => ({
+        players: this.players.map((p, join_order) => ({
           player_id: p.player_id,
           display_name: p.display_name,
           coins: p.coins,
           score: p.score,
-          character_price: p.character_price
+          character_price: p.character_price,
+          join_order
         }))
       });
 
